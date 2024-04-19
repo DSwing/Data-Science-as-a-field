@@ -1,0 +1,285 @@
+---
+title: "NYC Shooting Incidents"
+author: "Domenico Guadalupi"
+date: "`r Sys.Date()`"
+output:
+  ioslides_presentation:
+    widescreen: true
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(sf)
+library(ggplot2)
+library(MASS)
+library(units)
+library(RColorBrewer)
+library(knitr)
+library(hrbrthemes)
+
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
+theme_set(theme_ipsum())
+```
+
+```{r, include=FALSE}
+url_shoot <- 'https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv'
+data <- read_csv(url_shoot)
+
+data <- data %>%
+  dplyr::select(-c(1, 5:16)) %>% 
+  mutate(OCCUR_DATE=mdy(OCCUR_DATE),
+                        month=as.integer(month(OCCUR_DATE)),
+                        year=as.integer(year(OCCUR_DATE)),
+                        hour=hour(OCCUR_TIME),
+                        BORO=as.factor(data$BORO)) %>% 
+  dplyr::select(-c(OCCUR_DATE,OCCUR_TIME,Longitude, Latitude, Lon_Lat)) %>%
+  st_as_sf(coords = c('X_COORD_CD', 'Y_COORD_CD'), crs='EPSG:2263', remove=FALSE)
+
+url_boro <- 'https://data.cityofnewyork.us/api/views/7t3b-ywvw/rows.csv'
+boro <- read_csv(url_boro)
+
+boro <- boro %>%
+  mutate(geom=st_as_sfc(the_geom)) %>%
+  st_as_sf(crs='EPSG:4326') %>%
+  st_transform(st_crs(data)) %>%
+  mutate(BORO = as.factor(toupper(BoroName)),
+         Area_kmq = set_units(as_units(Shape_Area,'ft^2'), 'km^2')) %>%
+  dplyr::select(-c(1:5))
+
+```
+
+
+## Welcome to NYC: Ensuring Your Safety
+
+```{r, fig.align='center'}
+ggplot()+
+  geom_sf(data=boro, alpha=1, aes(fill=BORO))+scale_fill_brewer(palette='Set1')
+```
+
+
+## The NYPD Shooting Incidents Dataset  
+
+Total ```r nrow(data)``` incidents from year ```r min(data$year)``` to ```r max(data$year)```
+
+```{r, fig.width=5, fig.show='asis'}
+ggplot()+
+  geom_sf(data=boro, alpha=1, aes(fill=BORO))+scale_fill_brewer(palette='Set1')+
+  geom_sf(data=data, size=0.3, alpha=0.3)+
+  theme(legend.position='none')
+
+ggplot(data %>% group_by(year) %>% count(BORO)) +
+  geom_col(aes(x=reorder(BORO,n), fill=BORO, y=n))+
+  scale_fill_brewer(palette='Set1')+
+  labs(x=NULL, y='N', title='Incidents')+
+  theme(legend.position='none')+
+  coord_flip()
+```
+
+
+## Concentration of incidents
+```{r, include=FALSE}
+N <- nrow(data)
+NY_Area <- sum(boro$Area_kmq)
+N_days <- (1+diff(range(data$OCCUR_DATE))) %>% as.numeric() %>% set_units('day')
+N_years <- (1+diff(range(data$year))) %>% set_units('year')
+freq_year <- nrow(data)/N_years
+freq_year_kmq <- round(freq_year/NY_Area,2)
+```
+
+Normalizing the values by the areas of the Borough for a better comparison
+
+```{r, include=FALSE}
+density <- kde2d(data$X_COORD_CD, data$Y_COORD_CD)
+df <- expand.grid(x=density$x, y=density$y)
+df$density <- as.vector(density$z) %>% as.numeric()
+df <- st_as_sf(df, coords = c('x', 'y'), crs='EPSG:2263', remove=FALSE) 
+
+mask <- st_difference(st_as_sfc(st_bbox(st_union(boro))), st_union(boro))
+
+```
+
+```{r, fig.width=5, fig.show='asis', message=FALSE}
+ggplot() +
+  geom_sf(data=boro %>% st_transform(st_crs(data)), aes(color=BORO), linewidth=1)+
+  geom_contour_filled(data=df,aes(x = x, y = y, z=density), alpha=0.5, linewidth=0.8, bins=9)+
+#  geom_sf(data = mask, fill='white')+
+  theme(legend.position = 'none')+
+  labs(x=NULL, y=NULL)+
+  scale_fill_brewer(palette='Reds')+
+  scale_color_brewer(palette='Set1')
+
+data <- data %>% st_drop_geometry()
+boro <- boro %>% st_drop_geometry()
+data <- data %>% left_join(boro)
+distribution <- data %>% group_by(BORO, Area_kmq) %>% summarise(N = n(),.groups = 'drop') %>% mutate(density = N/as.numeric(Area_kmq))
+
+ggplot(distribution) +
+  geom_col(aes(x=reorder(BORO,density), fill=BORO, y=density))+
+  scale_fill_brewer(palette='Set1')+
+  labs(x=NULL, y = expression("N/km"^"2"), y=NULL,title='Density of Incidents')+
+  theme(legend.position = 'none')+
+  coord_flip()
+```
+
+
+## What about the time?
+
+```{r, fig.align='center', fig.width=10}
+ggplot(data)+
+  geom_line(aes(x=year), stat='count',  linewidth=0.8)+
+  geom_point(aes(x=year), stat='count', color='red', size=2)+
+  labs(y=NULL, title='Incidents vs Time') +
+  scale_x_continuous(breaks = seq(2005, 2025, by = 2))
+```
+
+
+## Borough compared over time
+```{r, fig.align='center', fig.width=10}
+ggplot(data) +
+  geom_line(aes(x =year, color=BORO), stat='count', size=1) +
+  scale_color_brewer(palette='Set1') +
+  labs(y=NULL, title='Count of Incidents over Time')  +
+  scale_x_continuous(breaks = seq(2005, 2025, by = 2))
+```
+
+
+## Borough compared over time
+```{r, include=FALSE}
+distribution <- data %>% mutate(year) %>% group_by(BORO, Area_kmq, year) %>% summarise(N = n()) %>% mutate(freq = N/as.numeric(Area_kmq))
+```
+
+```{r, fig.align='center', fig.width=10}
+ggplot(distribution) +
+  geom_line(aes(x =year, color=BORO, y=freq), size=1) +
+  scale_color_brewer(palette='Set1') +
+  labs(y = expression("1/km"^"2"), title='Density of Incidents over Time') +
+  scale_x_continuous(breaks = seq(2005, 2025, by = 2))
+```  
+
+
+## Seasonality
+```{r, fig.align='center', fig.width=10}
+ggplot(data)+
+  geom_line(aes(x=month, color=BORO), stat='count', size=1) +
+  scale_color_brewer(palette='Set1') +
+  scale_x_continuous(breaks = seq(1, 12, by = 2),
+                     labels = c('Jan', 'Mar', 'May', 'Jul', 'Sep', 'Nov'))+
+  labs(y=NULL, title='Incidents Throughout the Year: Monthly Trends')
+
+```
+
+
+## Which hours are the safest?
+Incidents Throughout the Day  
+```{r, fig.align='center', fig.width=10}
+ggplot(data %>% mutate(hour = hour))+
+         geom_point(aes(x=hour), stat = 'count', color='red')+
+  scale_x_continuous(breaks=seq(0,23,2)) +
+  labs(y=NULL, title='Hourly Distribution')
+
+```
+
+## Which hours are the safest?
+Incidents Throughout the Day  
+
+```{r}
+data_h <- data %>% group_by(hour) %>% summarise(N=n())
+lm_model <- lm(N~poly(hour, 3), data=data_h)
+
+predicted <- predict(lm_model, data_h)
+
+# Residuals (errors)
+residuals <- resid(lm_model)
+
+# Combine predicted values and residuals into a data frame
+plot_data <- data.frame(hour=data_h$hour, N = data_h$N, y = predicted, residuals = residuals)
+
+```
+
+```{r, fig.align='center', fig.width=10}
+# Plot the data points and the fitted curve
+ggplot(plot_data, aes(x = hour, y = N)) +
+  geom_line(aes(y = y), size=0.8) +  # Fitted curve
+  geom_segment(aes(xend = hour, yend = N - residuals)) +  # Error bars
+  geom_point(color = "red") +
+  scale_x_continuous(breaks=seq(0,23,2)) +
+  labs(y=NULL, title='Hourly Distribution')
+
+```
+
+## Model Accuracy  
+Call:   
+```{r}
+summary(lm_model)$call
+```
+Coefficients:
+```{r}
+summary(lm_model)$coefficients
+```
+Adjusted $R^2$: ```r summary(lm_model)$adj.r.squared```
+
+
+
+## Possible biases  
+- Underreporting Bias    
+Not all shooting incidents may be reported to the authorities, leading to an underestimation of the true frequency of such events.  
+- Spatial Bias    
+Incidents may be more likely to be reported in certain areas compared to others, leading to spatial biases in the dataset.  
+- Temporal Bias    
+Reporting of incidents may vary over time, influenced by factors such as changes in law enforcement practices or public awareness campaigns.  
+
+## Conclusion
+- Area Selection  
+Choose locations with low incident frequencies when planning routes or activities.  
+- Seasonal Awareness  
+Remain vigilant during periods of increased incident frequency, such as summer months.  
+- Hourly Vigilance  
+Be cautious at night and opt for daylight hours when moving around.
+
+<!--
+> sessionInfo()
+R version 4.3.3 (2024-02-29 ucrt)
+Platform: x86_64-w64-mingw32/x64 (64-bit)
+Running under: Windows 10 x64 (build 19045)
+
+Matrix products: default
+
+
+locale:
+[1] LC_COLLATE=English_United States.utf8  LC_CTYPE=English_United States.utf8   
+[3] LC_MONETARY=English_United States.utf8 LC_NUMERIC=C                          
+[5] LC_TIME=English_United States.utf8    
+
+time zone: Europe/Rome
+tzcode source: internal
+
+attached base packages:
+[1] stats     graphics  grDevices utils     datasets  methods   base     
+
+other attached packages:
+ [1] hrbrthemes_0.8.7   knitr_1.45         RColorBrewer_1.1-3 units_0.8-5        MASS_7.3-60.0.1   
+ [6] sf_1.0-15          lubridate_1.9.3    forcats_1.0.0      stringr_1.5.1      dplyr_1.1.4       
+[11] purrr_1.0.2        readr_2.1.5        tidyr_1.3.1        tibble_3.2.1       ggplot2_3.5.0     
+[16] tidyverse_2.0.0   
+
+loaded via a namespace (and not attached):
+ [1] gtable_0.3.4            xfun_0.42               tzdb_0.4.0              vctrs_0.6.5            
+ [5] tools_4.3.3             generics_0.1.3          parallel_4.3.3          curl_5.2.1             
+ [9] proxy_0.4-27            fansi_1.0.6             pkgconfig_2.0.3         KernSmooth_2.23-22     
+[13] lifecycle_1.0.4         farver_2.1.1            compiler_4.3.3          munsell_0.5.0          
+[17] httpuv_1.6.15           fontquiver_0.2.1        fontLiberation_0.1.0    htmltools_0.5.7        
+[21] class_7.3-22            yaml_2.3.8              Rttf2pt1_1.3.12         later_1.3.2            
+[25] pillar_1.9.0            crayon_1.5.2            extrafontdb_1.0         gfonts_0.2.0           
+[29] classInt_0.4-10         mime_0.12               fontBitstreamVera_0.1.1 tidyselect_1.2.1       
+[33] digest_0.6.35           stringi_1.8.3           labeling_0.4.3          extrafont_0.19         
+[37] fastmap_1.1.1           grid_4.3.3              colorspace_2.1-0        cli_3.6.2              
+[41] magrittr_2.0.3          crul_1.4.2              utf8_1.2.4              e1071_1.7-14           
+[45] withr_3.0.0             promises_1.2.1          gdtools_0.3.7           scales_1.3.0           
+[49] bit64_4.0.5             timechange_0.3.0        rmarkdown_2.26          bit_4.0.5              
+[53] hms_1.1.3               shiny_1.8.1             evaluate_0.23           rlang_1.1.3            
+[57] isoband_0.2.7           Rcpp_1.0.12             xtable_1.8-4            glue_1.7.0             
+[61] DBI_1.2.2               httpcode_0.3.0          vroom_1.6.5             jsonlite_1.8.8         
+[65] rstudioapi_0.16.0       R6_2.5.1                systemfonts_1.0.6    
+-->
+

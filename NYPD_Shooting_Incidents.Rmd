@@ -1,0 +1,266 @@
+---
+title: "NYPD Shooting incidents"
+author: "Domenico Guadalupi"
+date: "`r Sys.Date()`"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(sf)
+library(MASS)
+library(units)
+library(RColorBrewer)
+library(knitr)
+```
+
+## The background
+
+In the bustling metropolis of New York City, safety is a paramount concern. Over the past year, the city has witnessed an alarming number of shooting incidents. But is NYC a safe place to call home? Which neighborhoods pose the greatest risks? And are we seeing any improvements over time?
+
+In this analysis, we delve deep into the data provided by the NYPD to unravel the truths behind the statistics.
+
+## Understanding the data
+
+We begin by examining "The NYPD Shooting Incident Data (Historic)" dataset, which contains detailed records of shooting incidents across the city:
+
+```{r}
+url_shoot <- 'https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv'
+data <- read_csv(url_shoot)
+head(data)
+```
+
+Let's start by familiarizing ourselves with the dataset. It contains comprehensive records of shooting incidents, capturing crucial details such as incident key, date, time, location, and demographics of both perpetrators and victims. 
+
+```{r}
+fields_matrix <- matrix(c('INCIDENT_KEY', 'Randomly generated persistent ID for each incident',
+'OCCUR_DATE', 'Date of the shooting incident',
+'OCCUR_TIME', 'Time of the shooting incident',
+'BORO', 'Borough where the shooting incident occurred',
+'PRECINCT', 'Precinct where the shooting incident occurred',
+'JURISDICTION_CODE', 'Jurisdiction where the shooting incident occurred.Jurisdiction codes 0(Patrol), 1(Transit) and 2(Housing) represent NYPD whilst codes 3 and more represent non NYPD jurisdictions',
+'LOCATION_DESC', 'Location of the shooting incident',
+'STATISTICAL_MURDER_FLAG', 'Shooting resulted in the victim’s death which would be counted as a murder',
+'PERP_AGE_GROUP', 'Perpetrator’s age within a category',
+'PERP_SEX', 'Perpetrator’s sex description',
+'PERP_RACE', 'Perpetrator’s race description',
+'VIC_AGE_GROUP', 'Victim’s age within a category',
+'VIC_SEX', 'Victim’s sex description',
+'VIC_RACE', 'Victim’s race description',
+'X_COORD_CD', 'Midblock X-coordinate for New York State Plane Coordinate System, Long Island Zone, NAD 83, units feet (FIPS 3104)',
+'Y_COORD_CD', 'Midblock Y-coordinate for New York State Plane Coordinate System, Long Island Zone, NAD 83, units feet (FIPS 3104)',
+'Latitude', 'Latitude coordinate for Global Coordinate System, WGS 1984, decimal degrees (EPSG 4326)',
+'Longitude', 'Longitude coordinate for Global Coordinate System, WGS 1984, decimal degrees (EPSG 4326)'
+
+), ncol=2, byrow=TRUE, dimnames = list(NULL, c('field', 'description')))
+fields <- as.data.frame(fields_matrix)
+knitr::kable(fields)
+```
+
+```{r}
+summary(data)
+```
+
+We then streamline the dataset by focusing on essential fields and perform necessary transformations for analysis.
+
+
+```{r}
+data <- data[, -c(1,5:16)]
+
+data <- data %>% mutate(OCCUR_DATE=mdy(OCCUR_DATE),
+                        month=as.integer(month(OCCUR_DATE)),
+                        year=as.integer(year(OCCUR_DATE))) %>% 
+  dplyr::select(-OCCUR_DATE)
+
+data <- data %>% mutate(hour=hour(OCCUR_TIME)) %>% dplyr::select(-OCCUR_TIME)
+
+data$BORO <- as.factor(data$BORO)
+```
+
+Longitude and Latitude have 10 NAs.
+Let's have a look at them.
+
+```{r}
+data %>% filter(is.na(Longitude)|is.na(Latitude))
+```
+
+Latitude, Longitude, and Lon_Lat fields contain missing values for ten rows in the dataset. However, the projected coordinates fields (X_COORD_CD, Y_COORD_CD) have complete data with no missing values. To assess if these points are outliers, we visualize them on a scatter plot. Red points represent the rows with missing latitude or longitude values.
+
+```{r}
+ggplot(data, aes(X_COORD_CD, Y_COORD_CD))+
+  geom_point()+
+  geom_point(data=filter(data, is.na(Latitude)), col='red')
+```
+
+Based on the plot, there are no apparent outliers among the points with missing latitude or longitude values. Therefore, we will retain these points in the study. Subsequently, we will discard the Latitude, Longitude, and Lon_Lat columns and utilize the projected coordinates instead. The coordinate reference system employed is the New York State Plane Coordinate System, Long Island Zone, NAD 83, with units in feet (FIPS 3104), corresponding to EPSG:2263. We will use the sf library to associate a geometry and the correct reference system with the data.
+
+```{r}
+data <- data %>% dplyr::select(-c(Longitude, Latitude, Lon_Lat)) %>% st_as_sf(coords = c('X_COORD_CD', 'Y_COORD_CD'), crs='EPSG:2263', remove=FALSE)
+head(data)
+```
+
+## Spatial Analysis: Mapping Incidents Across Boroughs
+
+To visualize the spatial distribution of shooting incidents, we leverage the geographic data of New York City boroughs. By plotting incident locations against borough boundaries, we gain insights into the concentration of incidents in different areas.
+Still from the "https://data.gov/" site we download the "Borough Boundaries" dataset.
+
+```{r}
+url_boro <- 'https://data.cityofnewyork.us/api/views/7t3b-ywvw/rows.csv'
+boro <- read_csv(url_boro)
+head(boro)
+```
+
+The coordinates in the the_geom column are in WGS84 Latitude and Longitude format. To align them with the rest of our data, we project them to EPSG:2263. Additionally, we convert the Shape_Area column, which is measured in square feet (ft^2), to square kilometers (km^2), and rename it accordingly.
+
+Furthermore, we convert the BORO field to a factor and order it to ensure consistency of colors in subsequent graphs.  
+
+```{r}
+boro <- boro %>% mutate(geom=st_as_sfc(the_geom)) %>% st_as_sf(crs='EPSG:4326') %>% st_transform(st_crs(data)) %>% mutate(BORO = as.factor(toupper(BoroName))) %>% mutate(Area_kmq = set_units(as_units(Shape_Area,'ft^2'), 'km^2')) %>% dplyr::select(-c(1:5))
+
+#levels(boro$BORO)=c("QUEENS", "BRONX", "BROOKLYN", "MANHATTAN", "STATEN ISLAND")
+
+head(boro)
+```
+
+We can visualize the geographic distribution of the incidents and identify the most high-risk areas by generating a scatterplot and a 2D density estimate of the distribution. 
+
+```{r}
+ggplot()+
+  geom_sf(data=boro, alpha=1, aes(fill=BORO))+scale_fill_brewer(palette='Set1')+
+  geom_sf(data=data, size=0.3, alpha=0.3)
+```
+
+```{r}
+density <- kde2d(data$X_COORD_CD, data$Y_COORD_CD)
+df <- expand.grid(x=density$x, y=density$y)
+df$density <- as.vector(density$z) %>% as.numeric()
+df <- st_as_sf(df, coords = c('x', 'y'), crs='EPSG:2263', remove=FALSE) 
+
+mask <- st_difference(st_as_sfc(st_bbox(st_union(boro))), st_union(boro))
+
+ggplot() +
+  geom_sf(data=boro %>% st_transform(st_crs(data)))+
+  geom_contour_filled(data=df,aes(x = x, y = y, z=density), alpha=0.5, linewidth=0.8, bins=20)+
+  geom_sf(data = mask, fill='white')+
+  theme_minimal()+
+  theme(legend.position = 'none')+
+  labs(x=NULL, y=NULL)
+
+```
+  
+Now, let's delve deeper into the data to identify the boroughs with the highest incidence of incidents. While there may be a common perception that the Bronx is the most dangerous area in NYC, we need to scrutinize this assumption. Is it grounded in reality, or is it merely a bias perpetuated by Hollywood films?  
+
+```{r}
+ggplot(data %>% count(BORO)) +
+  geom_col(aes(x=reorder(BORO,desc(n)), fill=BORO, y=n))+
+  scale_fill_brewer(palette='Set1')+
+  theme(axis.text.x = element_blank())
+```
+
+Upon reviewing the total counts, it appears that Brooklyn has the highest number of incidents. To make a fair comparison, we can normalize these numbers relative to the borough areas. This allows us to compare them based on the number of occurrences per square kilometer, which provides a more accurate measure of the level of danger.
+
+```{r}
+data <- data %>% st_drop_geometry()
+boro <- boro %>% st_drop_geometry()
+
+data <- data %>% left_join(boro)
+
+distribution <- data %>% group_by(BORO, Area_kmq) %>% summarise(N = n()) %>% mutate(density = N/as.numeric(Area_kmq))
+
+ggplot(distribution) +
+  geom_col(aes(x=BORO, fill=BORO, y=density))+
+  scale_fill_brewer(palette='Set1')+
+  theme(axis.text.x = element_blank())
+
+```
+
+We observe significant shifts from our earlier findings. While the Bronx indeed exhibits the highest density of incidents, both Brooklyn and Manhattan now appear remarkably similar in terms of incident density.
+
+## Temporal Trends: Analyzing Incidents Over Time  
+
+Next, we explore how shooting incidents have evolved over the years. By analyzing citywide trends and borough-specific variations, we aim to uncover patterns and changes in incident frequency.
+
+```{r}
+ggplot(data)+
+  geom_line(aes(x=year), stat='count',  linewidth=0.8)
+```
+
+The number of incidents steadily declined until 2019. However, in the past three years, there has been a notable increase once again.
+
+We can examine the trend for each borough individually.  
+
+```{r}
+ggplot(data) +
+  geom_line(aes(x =year, color=BORO), stat='count', size=0.8)+
+  scale_color_brewer(palette='Set1')
+```
+
+Once more, we can compare the level of danger by normalizing the data according to the area of each borough.
+
+```{r}
+distribution <- data %>% mutate(year) %>% group_by(BORO, Area_kmq, year) %>% summarise(N = n()) %>% mutate(freq = N/as.numeric(Area_kmq))
+ggplot(distribution) +
+  geom_line(aes(x =year, color=BORO, y=freq), size=1)+
+  scale_color_brewer(palette='Set1')
+```
+
+Upon reviewing the count of incidents per square kilometer, we notice that the values for Bronx, Manhattan, and Brooklyn are similar, especially in recent years.  
+Next, we aim to analyze the seasonality of the incidents.
+Let's examine how incidents are distributed across the months, year by year.
+
+```{r}
+ggplot(data)+
+  geom_line(aes(x=month, color=BORO), stat='count') +
+  scale_color_brewer(palette='Set1')+
+  facet_wrap(~year)
+```
+
+Now, let's explore the distribution of incidents across different hours of the day to identify which hours are considered safer.
+
+```{r}
+ggplot(data %>% mutate(hour = hour))+
+         geom_point(aes(x=hour), stat = 'count')+
+  scale_x_continuous(breaks=seq(0,23))
+```
+
+We can model this distribution using a third-degree polynomial linear model.
+
+```{r}
+data_h <- data %>% group_by(hour) %>% summarise(N=n())
+lm_model <- lm(N~poly(hour, 3), data=data_h)
+summary(lm_model)
+```
+
+Additionally, we can visualize the residuals on a graph to assess the model's fit.
+
+```{r}
+predicted <- predict(lm_model, data_h)
+
+# Residuals (errors)
+residuals <- resid(lm_model)
+
+# Combine predicted values and residuals into a data frame
+plot_data <- data.frame(hour=data_h$hour, N = data_h$N, y = predicted, residuals = residuals)
+
+# Plot the data points and the fitted curve
+ggplot(plot_data, aes(x = hour, y = N)) +
+  geom_line(aes(y = y), size=0.8) +  # Fitted curve
+  geom_segment(aes(xend = hour, yend = N - residuals)) +  # Error bars
+  geom_point(color = "red") +
+  theme_minimal()
+
+```
+
+## Conclusion
+
+Through spatial and temporal analysis, we gain valuable insights into the patterns and trends of shooting incidents in New York City. This analysis provides a comprehensive understanding of safety dynamics, which can inform policymakers, law enforcement agencies, and community stakeholders in implementing targeted interventions and strategies to address violence and enhance public safety.  
+Anyway, it is essential to acknowledge certain limitations and potential biases inherent in the data and analytical approach. One notable limitation is the reliance on reported incidents, which may be subject to underreporting or misclassification biases. Factors such as disparities in reporting practices across neighborhoods could skew the representation of incident patterns.  
+Spatial and temporal analyses may be influenced by factors such as population density, leading to spatial and temporal biases in the data.  
+The use of statistical modeling techniques, while informative, may introduce biases based on model specifications.  
+It is crucial for readers to interpret the findings with these limitations in mind and consider alternative data sources or methodologies to mitigate biases and ensure a more comprehensive understanding of safety dynamics in the city.
